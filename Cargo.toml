@@ -1,0 +1,8 @@
+[package]
+name = "rf95pi"
+version = "0.1.0"
+authors = ["wheelin <greg.emry@gmail.com>"]
+
+[dependencies]
+spidev = "0.3.0"
+sysfs_gpio = "0.5"
