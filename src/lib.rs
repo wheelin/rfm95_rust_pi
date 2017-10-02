@@ -184,7 +184,7 @@ impl Channel {
 }
 
 #[derive(Copy, Clone)]
-enum Bandwidth {
+pub enum Bandwidth {
     Bw125 = 0x07,
     Bw250 = 0x08,
     Bw500 = 0x09,
@@ -197,7 +197,7 @@ impl Bandwidth {
 }
 
 #[derive(Copy, Clone)]
-enum CodingRate {
+pub enum CodingRate {
     Cr5 = 0x01,
     Cr6 = 0x02,
     Cr7 = 0x03,
@@ -211,7 +211,7 @@ impl CodingRate {
 }
 
 #[derive(Copy, Clone)]
-enum SpreadingFactor {
+pub enum SpreadingFactor {
     Sf7 = 0x07,
     Sf8 = 0x08,
     Sf9 = 0x09,
@@ -227,7 +227,7 @@ impl SpreadingFactor {
 }
 
 #[derive(Copy, Clone)]
-enum LoraMode {
+pub enum LoraMode {
     Sleep = 0x80,
     Standby = 0x81,
     Tx = 0x83,
@@ -244,7 +244,7 @@ impl LoraMode {
 }
 
 #[derive(Copy, Clone)]
-enum DioFunction {
+pub enum DioFunction {
     RxDone = 0x00,
     TxDone = 0x01,
 }
@@ -253,7 +253,7 @@ impl DioFunction {
     pub fn as_u8(&self) -> u8 { *self as u8 }
 }
 
-struct RF95 {
+pub struct RF95 {
     ch : Channel,
     bw : Bandwidth,
     cr : CodingRate,
