@@ -9,6 +9,7 @@ use std::time::Duration;
 use std::io::{Read, Write, Error, ErrorKind};
 use std::sync::mpsc::{Sender, Receiver};
 use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const RST_BCM_PIN : u64 = 17;
 const DIO_BCM_PIN : u64 = 4;
@@ -156,7 +157,6 @@ impl FskOokRegister {
 }
 
 #[derive(Copy, Clone)]
-#[allow(non_snake_case)]
 pub enum Channel {
     Ch10 = 0xD84CCC,
     Ch11 = 0xD86000,
@@ -287,6 +287,8 @@ pub enum RF95EventType {
     DataSent,
     ErrorPinConfig,
     ErrorTimedOut,
+    ErrorWrongCrc,
+    ErrorCommBus,
 }
 
 pub struct RF95 {
@@ -297,9 +299,8 @@ pub struct RF95 {
     crc_check_enabled : bool,
     implicit_header_enabled : bool,
     pwr_db : u8,
-    continuous_receiving_enabled : bool,
-    
-    interrupt_thread_handle : Option<thread::JoinHandle<()>>,
+    thread_run : std::sync::Arc<AtomicBool>;
+    thread_handle : Option<std::thread::JoinHandle<()>>,
 
     rst_pin : Pin,
     int_pin : Pin,
@@ -339,7 +340,8 @@ impl RF95 {
                 crc_check_enabled : false,
                 implicit_header_enabled : false,
                 pwr_db        : 0,
-                continuous_receiving_enabled : false,
+                thread_run    : std::sync::Arc::new(AtomicBool::new(false)),
+                thread_handle : None,
                 rst_pin       : tmp_rst_pin,
                 int_pin       : tmp_dio_pin,
                 cs_pin        : tmp_cs_pin,
@@ -438,57 +440,116 @@ impl RF95 {
     pub fn listen_timed(&mut self, timeout : u32) -> io::Result<Receiver<RF95EventType>> {
         let (sender, receiver) = mpsc::channel();
         let input = Pin::new(DIO_BCM_PIN);
-        
-        thread::spawn(move || {
-            match input.set_direction(Direction::In) {
-                Ok(_) => (),
-                Err(_) => {
-                    sender.send(RF95EventType::ErrorPinConfig).unwrap();
-                    return;
-                },
-            };
-            
-            match input.set_edge(Edge::RisingEdge) {
-                Ok(_) => (),
-                Err(_) => {
-                    sender.send(RF95EventType::ErrorPinConfig).unwrap();
-                    return;
-                }
-            };
-            
-            let mut poller = match input.get_poller() {
-                Ok(p) => p,
-                Err(_) => {
-                    sender.send(RF95EventType::ErrorPinConfig).unwrap();
-                    return;
-                }
-            };
-            
-            loop {
-                match poller.poll(10).unwrap() {
-                    Some(_) => {
-                        let regv = self.read_register(LoraRegister::RegIrqFlags).unwrap();
-                        if regv.flag_enabled(IrqFlagMasks::CadDetected) {
-                            
-                        } 
+
+        let timeout = std::time::Duration::from_secs(timeout as u64);
+        let start = std::time::Instant::now();
+
+        self.thread_run.store(true, Ordering::SeqCst);
+        let run = self.thread_run.clone();
+
+        self.interrupt_thread_handle = thread::spawn(move || {
+            input.with_exported(|| {
+                match input.set_direction(Direction::In) {
+                    Ok(_) => (),
+                    Err(_) => {
+                        sender.send(RF95EventType::ErrorPinConfig).unwrap();
+                        return;
+                    },
+                };
+
+                match input.set_edge(Edge::RisingEdge) {
+                    Ok(_) => (),
+                    Err(_) => {
+                        sender.send(RF95EventType::ErrorPinConfig).unwrap();
+                        return;
+                    }
+                };
+
+                let mut poller = match input.get_poller() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        sender.send(RF95EventType::ErrorPinConfig).unwrap();
+                        return;
+                    }
+                };
+
+                while run.load(Ordering::SeqCst) {
+                    match poller.poll(10).unwrap() {
+                        Some(_) => {
+                            let regv = match self.read_register(LoraRegister::RegIrqFlags) {
+                                Ok(r) => r,
+                                Err(_) => {
+                                    sender.send(RF95EventType::ErrorCommBus).unwrap();
+                                    return;
+                                },
+                            };
+                            if regv.flag_enabled(IrqFlagMasks::CadDetected) {
+                                let regv = regv & !IrqFlagMasks::CadDetected.as_u8();
+                            }
+                            if regv.flag_enabled(IrqFlagMasks::CadDone) {
+                                let regv = regv & !IrqFlagMasks::CadDone.as_u8();
+                            }
+                            if regv.flag_enabled(IrqFlagMasks::FhssChangeChannel) {
+                                let regv = regv & !IrqFlagMasks::FhssChangeChannel.as_u8();
+                            }
+                            if regv.flag_enabled(IrqFlagMasks::PayloadCrcError) {
+                                sender.send(RF95EventType::ErrorWrongCrc).unwrap();
+                                let regv = regv & !IrqFlagMasks::PayloadCrcError.as_u8();
+                            }
+                            if regv.flag_enabled(IrqFlagMasks::RxDone) {
+                                sender.send(RF95EventType::RxDone).unwrap();
+                                let regv = regv & !IrqFlagMasks::RxDone.as_u8();
+                            }
+                            if regv.flag_enabled(IrqFlagMasks::TxDone) {
+                                sender.send(RF95EventType::TxDone).unwrap();
+                                let regv = regv & !IrqFlagMasks::TxDone.as_u8();
+                            }
+                            if regv.flag_enabled(IrqFlagMasks::RxTimeout) {
+                                sender.send(RF95EventType::ErrorTimedOut).unwrap();
+                                let regv = regv & !IrqFlagMasks::RxTimeout.as_u8();
+                            }
+                            if regv.flag_enabled(IrqFlagMasks::ValidHeader) {
+                                let regv = regv & !IrqFlagMasks::ValidHeader.as_u8();
+                            }
+                            match self.write_register(LoraRegister::RegIrqFlags, regv) {
+                                Ok(_) => (),
+                                Err(_) => {
+                                    sender.send(RF95EventType::ErrorCommBus).unwrap();
+                                    return;
+                                },
+                            };
+                        },
+                        None => (),
+                    };
+                    if timeout.as_secs() > 0 {
+                        if std::time::Instant::now().duration_since(start) > timeout {
+                            break;
+                        }
                     }
                 }
-            }
-        })
-        
-        Ok(())
-    }
+            }).expect("Cannot export gpio");
+        }).expect("Cannot listen to interrupts from RFM95, thread not starting");
 
-    pub fn disable_timer(&mut self) -> io::Result<()> {
-        Ok(())
+        Ok(receiver)
     }
 
     pub fn listen_continuous(&mut self) -> io::Result<Receiver<RF95EventType>> {
-        Ok(())
+        self.listen_timed(0)
     }
 
-    pub fn stop_listening(&mut self) -> io::Result<()> {
-        Ok(())
+    pub fn stop_listening(&mut self) -> Result<(), String> {
+        self.thread_run.store(false, Ordering::SeqCst);
+        match self.thread_handle {
+            Some(th) => {
+                match th.join() {
+                    Ok(_) => (),
+                    Err(_) => Err(format!("Cannot join spawned thread")),
+                }
+            },
+            None => {
+                Err(format!("No thread spawned"))
+            }
+        }
     }
 
     pub fn get_snr(&mut self) -> io::Result<i16> {

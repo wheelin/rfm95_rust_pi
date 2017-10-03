@@ -27,11 +27,11 @@ mod tests {
         let ca = 0xCC;
         assert!(ca == Channel::Ch10.lsb());
     }
-    
+
     #[test]
     fn init_test() {
 		if let Ok(radio) = super::rf95pi::RF95::new(Bandwidth::Bw250, CodingRate::Cr8, SpreadingFactor::Sf10) {
-		    	
+
 		} else {
 			panic!("Cannot create lora radio object");
 		}
