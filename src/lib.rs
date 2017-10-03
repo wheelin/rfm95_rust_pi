@@ -7,6 +7,8 @@ use std::io;
 use std::thread;
 use std::time::Duration;
 use std::io::{Read, Write, Error, ErrorKind};
+use std::sync::mpsc::{Sender, Receiver};
+use std::sync::mpsc;
 
 const RST_BCM_PIN : u64 = 17;
 const DIO_BCM_PIN : u64 = 4;
@@ -253,6 +255,40 @@ impl DioFunction {
     pub fn as_u8(&self) -> u8 { *self as u8 }
 }
 
+trait ToFlag {
+    pub fn flag_enabled(&self, f : IrqFlagMasks) -> bool;
+}
+
+#[derive(Copy, Clone)]
+enum IrqFlagMasks {
+    CadDetected = 0x01,
+    FhssChangeChannel = 0x02,
+    CadDone = 0x04,
+    TxDone = 0x08,
+    ValidHeader = 0x10,
+    PayloadCrcError = 0x20,
+    RxDone = 0x40,
+    RxTimeout = 0x80,
+}
+
+impl IrqFlagMasks {
+    pub fn as_u8(&self) -> u8 { *self as u8 }
+}
+
+impl ToFlag for u8 {
+    pub fn flag_enabled(&self, f : IrqFlagMasks) -> bool {
+        self & f.as_u8() != 0
+    }
+}
+
+pub enum RF95EventType {
+    None
+    DataReceived,
+    DataSent,
+    ErrorPinConfig,
+    ErrorTimedOut,
+}
+
 pub struct RF95 {
     ch : Channel,
     bw : Bandwidth,
@@ -262,10 +298,8 @@ pub struct RF95 {
     implicit_header_enabled : bool,
     pwr_db : u8,
     continuous_receiving_enabled : bool,
-
-    sent_callback : Option<Box<FnMut()>>,
-    recv_callback : Option<Box<FnMut()>>,
-    err_callback  : Option<Box<FnMut()>>,
+    
+    interrupt_thread_handle : Option<thread::JoinHandle<()>>,
 
     rst_pin : Pin,
     int_pin : Pin,
@@ -306,9 +340,6 @@ impl RF95 {
                 implicit_header_enabled : false,
                 pwr_db        : 0,
                 continuous_receiving_enabled : false,
-                sent_callback : None,
-                recv_callback : None,
-                err_callback  : None,
                 rst_pin       : tmp_rst_pin,
                 int_pin       : tmp_dio_pin,
                 cs_pin        : tmp_cs_pin,
@@ -404,7 +435,46 @@ impl RF95 {
         self.write_register(LoraRegister::RegOpMode, m.as_u8())
     }
 
-    pub fn listen_timed(&mut self, timeout : u32) -> io::Result<()> {
+    pub fn listen_timed(&mut self, timeout : u32) -> io::Result<Receiver<RF95EventType>> {
+        let (sender, receiver) = mpsc::channel();
+        let input = Pin::new(DIO_BCM_PIN);
+        
+        thread::spawn(move || {
+            match input.set_direction(Direction::In) {
+                Ok(_) => (),
+                Err(_) => {
+                    sender.send(RF95EventType::ErrorPinConfig).unwrap();
+                    return;
+                },
+            };
+            
+            match input.set_edge(Edge::RisingEdge) {
+                Ok(_) => (),
+                Err(_) => {
+                    sender.send(RF95EventType::ErrorPinConfig).unwrap();
+                    return;
+                }
+            };
+            
+            let mut poller = match input.get_poller() {
+                Ok(p) => p,
+                Err(_) => {
+                    sender.send(RF95EventType::ErrorPinConfig).unwrap();
+                    return;
+                }
+            };
+            
+            loop {
+                match poller.poll(10).unwrap() {
+                    Some(_) => {
+                        let regv = self.read_register(LoraRegister::RegIrqFlags).unwrap();
+                        if regv.flag_enabled(IrqFlagMasks::CadDetected) {
+                            
+                        } 
+                    }
+                }
+            }
+        })
         
         Ok(())
     }
@@ -413,7 +483,7 @@ impl RF95 {
         Ok(())
     }
 
-    pub fn listen_continuous(&mut self) -> io::Result<()> {
+    pub fn listen_continuous(&mut self) -> io::Result<Receiver<RF95EventType>> {
         Ok(())
     }
 
