@@ -2,12 +2,12 @@ extern crate spidev;
 extern crate sysfs_gpio;
 
 use sysfs_gpio::{Direction, Edge, Pin};
-use spidev::{Spidev, SpidevOptions, SpidevTransfer, SPI_MODE_0};
+use spidev::{Spidev, SpidevOptions, SPI_MODE_0};
 use std::io;
 use std::thread;
 use std::time::Duration;
-use std::io::{Read, Write, Error, ErrorKind};
-use std::sync::mpsc::{Sender, Receiver};
+use std::io::{Read, Write, ErrorKind};
+use std::sync::mpsc::{Receiver};
 use std::sync::mpsc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -256,7 +256,7 @@ impl DioFunction {
 }
 
 trait ToFlag {
-    pub fn flag_enabled(&self, f : IrqFlagMasks) -> bool;
+    fn flag_enabled(&self, f : IrqFlagMasks) -> bool;
 }
 
 #[derive(Copy, Clone)]
@@ -276,13 +276,13 @@ impl IrqFlagMasks {
 }
 
 impl ToFlag for u8 {
-    pub fn flag_enabled(&self, f : IrqFlagMasks) -> bool {
+    fn flag_enabled(&self, f : IrqFlagMasks) -> bool {
         self & f.as_u8() != 0
     }
 }
 
 pub enum RF95EventType {
-    None
+    None,
     DataReceived,
     DataSent,
     ErrorPinConfig,
@@ -299,37 +299,18 @@ pub struct RF95 {
     crc_check_enabled : bool,
     implicit_header_enabled : bool,
     pwr_db : u8,
-    thread_run : std::sync::Arc<AtomicBool>;
+    thread_run : std::sync::Arc<AtomicBool>,
     thread_handle : Option<std::thread::JoinHandle<()>>,
 
     rst_pin : Pin,
-    int_pin : Pin,
-    cs_pin  : Pin,
-
-    dev : Spidev,
 }
 
 impl RF95 {
     pub fn new(bw : Bandwidth, cr : CodingRate, sf : SpreadingFactor) -> io::Result<RF95> {
-        let mut tmpspi = Spidev::open("/dev/spidev0.0")?;
-        let spi_options = SpidevOptions::new()
-            .bits_per_word(8)
-            .max_speed_hz(5_000_000)
-            .mode(SPI_MODE_0)
-            .build();
-        tmpspi.configure(&spi_options)?;
-
-        let mut tmp_rst_pin = Pin::new(RST_BCM_PIN);
-        tmp_rst_pin.set_direction(Direction::Low);
+        let tmp_rst_pin = Pin::new(RST_BCM_PIN);
+        tmp_rst_pin.set_direction(Direction::Low).unwrap();
         thread::sleep(Duration::from_millis(10));
-        tmp_rst_pin.set_value(1);
-
-
-        let mut tmp_dio_pin = Pin::new(DIO_BCM_PIN);
-        tmp_dio_pin.set_direction(Direction::In);
-
-        let mut tmp_cs_pin  = Pin::new(CS_BCM_PIN);
-        tmp_cs_pin.set_direction(Direction::High);
+        tmp_rst_pin.set_value(1).unwrap();
 
         Ok(
             RF95 {
@@ -343,9 +324,6 @@ impl RF95 {
                 thread_run    : std::sync::Arc::new(AtomicBool::new(false)),
                 thread_handle : None,
                 rst_pin       : tmp_rst_pin,
-                int_pin       : tmp_dio_pin,
-                cs_pin        : tmp_cs_pin,
-                dev           : tmpspi,
             }
         )
     }
@@ -364,59 +342,59 @@ impl RF95 {
     pub fn set_channel(&mut self, ch : Channel) -> io::Result<()> {
         self.set_mode(LoraMode::Sleep)?;
         self.ch = ch;
-        self.write_register(LoraRegister::RegFrfMsb, ch.msb())?;
-        self.write_register(LoraRegister::RegFrfMid, ch.mid())?;
-        self.write_register(LoraRegister::RegFrfLsb, ch.lsb())
+        RF95::write_register(LoraRegister::RegFrfMsb, ch.msb())?;
+        RF95::write_register(LoraRegister::RegFrfMid, ch.mid())?;
+        RF95::write_register(LoraRegister::RegFrfLsb, ch.lsb())
     }
 
     pub fn set_spreading_factor(&mut self, sf : SpreadingFactor) -> io::Result<()> {
         self.set_mode(LoraMode::Sleep)?;
         self.sf = sf;
-        let mut tmp = self.read_register(LoraRegister::RegModemConfig2)?;
+        let mut tmp = RF95::read_register(LoraRegister::RegModemConfig2)?;
         tmp &= 0x0F;
         tmp |= sf.as_u8() << 4;
-        self.write_register(LoraRegister::RegModemConfig2, tmp)
+        RF95::write_register(LoraRegister::RegModemConfig2, tmp)
     }
 
     pub fn set_bandwidth(&mut self, bw : Bandwidth) -> io::Result<()> {
         self.set_mode(LoraMode::Sleep)?;
         self.bw = bw;
-        let mut tmp = self.read_register(LoraRegister::RegModemConfig1)?;
+        let mut tmp = RF95::read_register(LoraRegister::RegModemConfig1)?;
         tmp &= 0x0F;
         tmp |= bw.as_u8() << 4;
-        self.write_register(LoraRegister::RegModemConfig1, tmp)?;
+        RF95::write_register(LoraRegister::RegModemConfig1, tmp)?;
         Ok(())
     }
 
     pub fn set_coding_rate(&mut self, cr : CodingRate) -> io::Result<()> {
         self.set_mode(LoraMode::Sleep)?;
         self.cr = cr;
-        let mut tmp = self.read_register(LoraRegister::RegModemConfig1)?;
+        let mut tmp = RF95::read_register(LoraRegister::RegModemConfig1)?;
         tmp &= 0xF1;
         tmp |= cr.as_u8() << 1;
-        self.write_register(LoraRegister::RegModemConfig1, tmp)
+        RF95::write_register(LoraRegister::RegModemConfig1, tmp)
     }
 
     pub fn enable_crc_check(&mut self, en : bool) -> io::Result<()> {
-        let mut tmp = self.read_register(LoraRegister::RegModemConfig2)?;
+        let mut tmp = RF95::read_register(LoraRegister::RegModemConfig2)?;
         if en {
             tmp |= 1 << 2;
         } else {
             tmp &= !(1 << 2);
         }
         self.crc_check_enabled = en;
-        self.write_register(LoraRegister::RegModemConfig2, tmp)
+        RF95::write_register(LoraRegister::RegModemConfig2, tmp)
     }
 
     pub fn enable_implicit_header(&mut self, en : bool) -> io::Result<()> {
-        let mut tmp = self.read_register(LoraRegister::RegModemConfig1)?;
+        let mut tmp = RF95::read_register(LoraRegister::RegModemConfig1)?;
         if en {
             tmp |= 0x01;
         } else {
             tmp &= !0x01;
         }
         self.implicit_header_enabled = en;
-        self.write_register(LoraRegister::RegModemConfig1, tmp)
+        RF95::write_register(LoraRegister::RegModemConfig1, tmp)
     }
 
     pub fn set_output_power(&mut self, pwr : u8) -> io::Result<()> {
@@ -426,96 +404,97 @@ impl RF95 {
         }
         self.pwr_db = pwr;
         let out = (pwr - 2) & 0x0F;
-        let mut tmp = self.read_register(LoraRegister::RegPaConfig)?;
+        let mut tmp = RF95::read_register(LoraRegister::RegPaConfig)?;
         tmp |= 0x80;
         tmp &= 0xF0;
         tmp |= out & 0x0F;
-        self.write_register(LoraRegister::RegPaConfig, tmp)
+        RF95::write_register(LoraRegister::RegPaConfig, tmp)
     }
 
     pub fn set_mode(&mut self, m : LoraMode) -> io::Result<()> {
-        self.write_register(LoraRegister::RegOpMode, m.as_u8())
+        RF95::write_register(LoraRegister::RegOpMode, m.as_u8())
     }
 
     pub fn listen_timed(&mut self, timeout : u32) -> io::Result<Receiver<RF95EventType>> {
         let (sender, receiver) = mpsc::channel();
         let input = Pin::new(DIO_BCM_PIN);
 
-        let timeout = std::time::Duration::from_secs(timeout as u64);
-        let start = std::time::Instant::now();
+
 
         self.thread_run.store(true, Ordering::SeqCst);
         let run = self.thread_run.clone();
 
-        self.interrupt_thread_handle = thread::spawn(move || {
+        self.thread_handle = Some(thread::spawn(move || {
             input.with_exported(|| {
+                let timeout = std::time::Duration::from_secs(timeout as u64);
+                let start = std::time::Instant::now();
                 match input.set_direction(Direction::In) {
                     Ok(_) => (),
-                    Err(_) => {
+                    Err(e) => {
                         sender.send(RF95EventType::ErrorPinConfig).unwrap();
-                        return;
+                        panic!("Error while setting DI0 pin direction : {:?}", e);
                     },
                 };
 
                 match input.set_edge(Edge::RisingEdge) {
                     Ok(_) => (),
-                    Err(_) => {
+                    Err(e) => {
                         sender.send(RF95EventType::ErrorPinConfig).unwrap();
-                        return;
+                        panic!("Error while setting DI0 pin edge detection : {:?}", e);
                     }
                 };
 
                 let mut poller = match input.get_poller() {
                     Ok(p) => p,
-                    Err(_) => {
+                    Err(e) => {
                         sender.send(RF95EventType::ErrorPinConfig).unwrap();
-                        return;
+                        panic!("Error while creating poller on DI0 : {:?}", e);
                     }
                 };
 
                 while run.load(Ordering::SeqCst) {
                     match poller.poll(10).unwrap() {
                         Some(_) => {
-                            let regv = match self.read_register(LoraRegister::RegIrqFlags) {
+                            let mut regv = match RF95::read_register(LoraRegister::RegIrqFlags) {
                                 Ok(r) => r,
                                 Err(_) => {
                                     sender.send(RF95EventType::ErrorCommBus).unwrap();
-                                    return;
+                                    return Err(sysfs_gpio::Error::from(io::Error::new(io::ErrorKind::Other, format!("Reading irq flag register"))));
                                 },
                             };
                             if regv.flag_enabled(IrqFlagMasks::CadDetected) {
-                                let regv = regv & !IrqFlagMasks::CadDetected.as_u8();
+                                regv = regv & !IrqFlagMasks::CadDetected.as_u8();
                             }
                             if regv.flag_enabled(IrqFlagMasks::CadDone) {
-                                let regv = regv & !IrqFlagMasks::CadDone.as_u8();
+                                regv = regv & !IrqFlagMasks::CadDone.as_u8();
                             }
                             if regv.flag_enabled(IrqFlagMasks::FhssChangeChannel) {
-                                let regv = regv & !IrqFlagMasks::FhssChangeChannel.as_u8();
+                                regv = regv & !IrqFlagMasks::FhssChangeChannel.as_u8();
                             }
                             if regv.flag_enabled(IrqFlagMasks::PayloadCrcError) {
                                 sender.send(RF95EventType::ErrorWrongCrc).unwrap();
-                                let regv = regv & !IrqFlagMasks::PayloadCrcError.as_u8();
+                                regv = regv & !IrqFlagMasks::PayloadCrcError.as_u8();
                             }
                             if regv.flag_enabled(IrqFlagMasks::RxDone) {
-                                sender.send(RF95EventType::RxDone).unwrap();
-                                let regv = regv & !IrqFlagMasks::RxDone.as_u8();
+                                sender.send(RF95EventType::DataSent).unwrap();
+                                regv = regv & !IrqFlagMasks::RxDone.as_u8();
                             }
                             if regv.flag_enabled(IrqFlagMasks::TxDone) {
-                                sender.send(RF95EventType::TxDone).unwrap();
-                                let regv = regv & !IrqFlagMasks::TxDone.as_u8();
+                                sender.send(RF95EventType::DataReceived).unwrap();
+                                regv = regv & !IrqFlagMasks::TxDone.as_u8();
                             }
                             if regv.flag_enabled(IrqFlagMasks::RxTimeout) {
                                 sender.send(RF95EventType::ErrorTimedOut).unwrap();
-                                let regv = regv & !IrqFlagMasks::RxTimeout.as_u8();
+                                regv = regv & !IrqFlagMasks::RxTimeout.as_u8();
                             }
                             if regv.flag_enabled(IrqFlagMasks::ValidHeader) {
-                                let regv = regv & !IrqFlagMasks::ValidHeader.as_u8();
+                                regv = regv & !IrqFlagMasks::ValidHeader.as_u8();
                             }
-                            match self.write_register(LoraRegister::RegIrqFlags, regv) {
+                            match RF95::write_register(LoraRegister::RegIrqFlags, regv) {
                                 Ok(_) => (),
                                 Err(_) => {
                                     sender.send(RF95EventType::ErrorCommBus).unwrap();
-                                    return;
+                                    return Err(sysfs_gpio::Error::from(io::Error::new(io::ErrorKind::Other, format!("Reading irq flag register"))));
                                 },
                             };
                         },
@@ -527,8 +506,9 @@ impl RF95 {
                         }
                     }
                 }
+                Ok(())
             }).expect("Cannot export gpio");
-        }).expect("Cannot listen to interrupts from RFM95, thread not starting");
+        }));
 
         Ok(receiver)
     }
@@ -539,106 +519,132 @@ impl RF95 {
 
     pub fn stop_listening(&mut self) -> Result<(), String> {
         self.thread_run.store(false, Ordering::SeqCst);
-        match self.thread_handle {
+        match self.thread_handle.take() {
             Some(th) => {
                 match th.join() {
-                    Ok(_) => (),
-                    Err(_) => Err(format!("Cannot join spawned thread")),
-                }
+                    Ok(_) => return Ok(()),
+                    Err(_) => return Err(format!("Cannot join spawned thread")),
+                };
             },
-            None => {
-                Err(format!("No thread spawned"))
-            }
-        }
+            None => return Err(format!("No thread spawned")),
+        };
     }
 
     pub fn get_snr(&mut self) -> io::Result<i16> {
-        Ok((self.read_register(LoraRegister::RegPktSnrValue)? as i16) / 4)
+        Ok((RF95::read_register(LoraRegister::RegPktSnrValue)? as i16) / 4)
     }
 
     pub fn get_packet_rssi(&mut self) -> io::Result<i16> {
-        Ok((self.read_register(LoraRegister::RegRssiValue)? as i16) - 137)
+        Ok((RF95::read_register(LoraRegister::RegRssiValue)? as i16) - 137)
     }
 
     pub fn get_rssi(&mut self) -> io::Result<i16> {
-        Ok((self.read_register(LoraRegister::RegRssiValue)? as i16) - 137)
+        Ok((RF95::read_register(LoraRegister::RegRssiValue)? as i16) - 137)
     }
 
     pub fn reset(&mut self) -> io::Result<()> {
         match self.rst_pin.set_direction(Direction::Low) {
-            Ok(_) => Ok(()),
-            Err(_) => Err(std::io::Error::new(ErrorKind::Other, "Problem setting value on gpio")),
+            Ok(_) => (),
+            Err(_) => return Err(std::io::Error::new(ErrorKind::Other, "Problem setting value on gpio")),
         };
         std::thread::sleep(Duration::new(0, 10000000));
         match self.rst_pin.set_value(1) {
-            Ok(_) => Ok(()),
-            Err(_) => Err(std::io::Error::new(ErrorKind::Other, "Problem setting value on gpio")),
+            Ok(_) => return Ok(()),
+            Err(_) => return Err(std::io::Error::new(ErrorKind::Other, "Problem setting value on gpio")),
         };
-        Ok(())
     }
 
     pub fn set_dio_mapping(&mut self, df : DioFunction) -> io::Result<()> {
-        let prev_mode = self.read_register(LoraRegister::RegOpMode)?;
+        let prev_mode = RF95::read_register(LoraRegister::RegOpMode)?;
         self.set_mode(LoraMode::StandbyOokFsk)?;
-        let mut tmp = self.read_register(LoraRegister::RegDioMapping1)?;
+        let mut tmp = RF95::read_register(LoraRegister::RegDioMapping1)?;
         tmp &= 0x3F;
         if df.as_u8() == DioFunction::TxDone.as_u8() {
             tmp |= 0x40;
         }
-        self.write_register(LoraRegister::RegDioMapping1, tmp)?;
-        self.write_register(LoraRegister::RegOpMode, prev_mode)
+        RF95::write_register(LoraRegister::RegDioMapping1, tmp)?;
+        RF95::write_register(LoraRegister::RegOpMode, prev_mode)
     }
 
-    fn write_register(&mut self, reg : LoraRegister, data : u8) -> io::Result<()> {
-        match self.dev.write(&[reg.as_u8(), data]) {
+    fn write_register(reg : LoraRegister, data : u8) -> io::Result<()> {
+        let mut spi = Spidev::open("/dev/spidev0.0")?;
+        let spi_options = SpidevOptions::new()
+            .bits_per_word(8)
+            .max_speed_hz(5_000_000)
+            .mode(SPI_MODE_0)
+            .build();
+        spi.configure(&spi_options)?;
+
+        match spi.write(&[reg.as_u8(), data]) {
             Ok(_) => Ok(()),
             Err(_) => Err(io::Error::new(ErrorKind::Other, "Problem while writing to device"))
         }
     }
 
-    fn write_buffer(&mut self, reg : LoraRegister, buffer : Vec<u8>) -> io::Result<()> {
+    fn write_buffer(reg : LoraRegister, buffer : Vec<u8>) -> io::Result<()> {
+        let mut spi = Spidev::open("/dev/spidev0.0")?;
+        let spi_options = SpidevOptions::new()
+            .bits_per_word(8)
+            .max_speed_hz(5_000_000)
+            .mode(SPI_MODE_0)
+            .build();
+        spi.configure(&spi_options)?;
+
+        let cs_pin  = Pin::new(CS_BCM_PIN);
+        cs_pin.set_direction(Direction::High).unwrap();
+
         let mut v2 = buffer;
         v2.insert(0, reg.as_u8());
-        match self.cs_pin.set_value(0) {
-            Ok(_) => Ok(()),
-            Err(_) => Err(std::io::Error::new(ErrorKind::Other, "Problem setting value on gpio")),
-        };
-        self.dev.write(&v2)?;
-        match self.cs_pin.set_value(1) {
+        cs_pin.set_value(0).unwrap();
+        spi.write(&v2)?;
+        match cs_pin.set_value(1) {
             Ok(_) => Ok(()),
             Err(_) => Err(std::io::Error::new(ErrorKind::Other, "Problem setting value on gpio")),
         }
     }
 
-    fn read_register(&mut self, reg : LoraRegister) -> io::Result<u8> {
+    fn read_register(reg : LoraRegister) -> io::Result<u8> {
+        let mut spi = Spidev::open("/dev/spidev0.0")?;
+        let spi_options = SpidevOptions::new()
+            .bits_per_word(8)
+            .max_speed_hz(5_000_000)
+            .mode(SPI_MODE_0)
+            .build();
+        spi.configure(&spi_options)?;
+
+        let cs_pin  = Pin::new(CS_BCM_PIN);
+        cs_pin.set_direction(Direction::High).unwrap();
+
         let mut ret: [u8; 1] = [0; 1];
-        match self.cs_pin.set_value(0) {
-            Ok(_) => Ok(()),
-            Err(_) => Err(std::io::Error::new(ErrorKind::Other, "Problem setting value on gpio")),
-        };
-        self.dev.write(&[reg.as_u8()])?;
-        let val = self.dev.read(&mut ret)?;
-        match self.cs_pin.set_value(1) {
+        cs_pin.set_value(0).unwrap();
+        spi.write(&[reg.as_u8()])?;
+        spi.read(&mut ret).unwrap();
+        match cs_pin.set_value(1) {
             Ok(_) => (),
             Err(_) => return Err(io::Error::new(ErrorKind::Other, "Problem setting value on gpio")),
         };
         Ok(ret[0])
     }
 
-    fn read_buffer(&mut self, reg : LoraRegister, buffer : &mut Vec<u8>, length : u8) -> io::Result<()> {
+    fn read_buffer(reg : LoraRegister, buffer : &mut Vec<u8>, length : u8) -> io::Result<()> {
+        let mut spi = Spidev::open("/dev/spidev0.0")?;
+        let spi_options = SpidevOptions::new()
+            .bits_per_word(8)
+            .max_speed_hz(5_000_000)
+            .mode(SPI_MODE_0)
+            .build();
+        spi.configure(&spi_options)?;
+
+        let cs_pin  = Pin::new(CS_BCM_PIN);
+        cs_pin.set_direction(Direction::High).unwrap();
+
         let mut tmp : Vec<u8> = Vec::with_capacity(length as usize);
-        match self.cs_pin.set_value(0) {
-            Ok(_) => Ok(()),
-            Err(_) => Err(std::io::Error::new(ErrorKind::Other, "Problem setting value on gpio")),
-        };
-        self.dev.write(&[reg.as_u8()])?;
-        self.dev.read(tmp.as_mut_slice())?;
+        cs_pin.set_value(0).unwrap();
+        spi.write(&[reg.as_u8()])?;
+        spi.read(tmp.as_mut_slice())?;
         buffer.clear();
         buffer.write(&tmp)?;
-        match self.cs_pin.set_value(1) {
-            Ok(_) => Ok(()),
-            Err(_) => Err(std::io::Error::new(ErrorKind::Other, "Problem setting value on gpio")),
-        };
+        cs_pin.set_value(1).unwrap();
         Ok(())
     }
 }
